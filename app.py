@@ -4,147 +4,128 @@ import numpy as np
 import io
 from datetime import datetime
 
-# --- SETTINGS & CONFIG ---
-st.set_page_config(page_title="Car Rental Automation Tool", layout="wide")
+# --- SETTINGS ---
+st.set_page_config(page_title="Car Rental Automation", layout="wide")
 
-# --- 1. SHARED UTILITIES ---
-def merge_columns(df, mapping):
-    """Universal column merging logic used by both tools."""
-    for target_col, variations in mapping.items():
-        existing_cols = [col for col in variations if col in df.columns]
-        if existing_cols:
-            df[target_col] = df[existing_cols].bfill(axis=1).iloc[:, 0]
-            # Optionally drop the variations that aren't the target_col
-            # to keep the dataframe clean
-            cols_to_drop = [c for c in existing_cols if c != target_col]
-            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-    return df
-
-# --- 2. MIS AUTOMATION LOGIC (Existing) ---
-def process_car_rental_mis(file):
-    df = pd.read_csv(file)
-    
-    # Original Merging Logic
-    columns_to_merge = {
-        'Emp ID': ['Emp ID', 'EMP ID', 'EMP CODE', 'EMP. CODE', 'EMP .CODE', 'Employee ID', 'Emp_ID', 'Employee_ID'],
-        'Cost Center': ['Cost Center', 'COST CENTER', 'Cost Centre', 'Cost_Center'],
-        'GSTN Number': ['GSTN Number', 'GSTN NUMBER', 'GSTIN NUMBER', 'GSTIN', 'GST_Number'],
-        'TRAVEL ID': ['TRAVEL ID', 'Travel id', 'Travel_ID', 'Travel ID'],
-        'Trip id': ['Trip id', 'TRIP ID', 'Trip_ID', 'Trip ID']
-    }
-    df = merge_columns(df, columns_to_merge)
-
-    if 'Trip Status' in df.columns:
-        df = df[df['Trip Status'].str.upper() != 'CANCELLED']
-    
-    if 'Labels' in df.columns:
-        df['Labels'] = df['Labels'].fillna('')
-        unwanted = 'No Bill|Pickup Fail|Duplicate Booking|Vendor No-show'
-        df = df[~df['Labels'].str.contains(unwanted, case=False, regex=True)]
-    
-    return df
-
-# --- 3. BDC AUTOMATION LOGIC (New) ---
-def process_bdc_automation(file):
-    df = pd.read_csv(file)
-    
-    # Updated Merging Logic (as requested)
-    bdc_mapping = {
+# --- 1. COLUMN MERGING LOGIC ---
+def apply_merging_logic(df):
+    # Mapping based on your specific requirements
+    merging_map = {
         'Trip ID': ['Trip id', 'TRIP ID', 'Trip ID'],
         'Emp ID': ['Emp ID', 'EMP CODE', 'EMP ID', 'EMP .CODE', 'Employee ID', 'EMP. CODE'],
         'GSTN Number': ['GSTN Number', 'GSTN NUMBER', 'GST Number', 'GSTIN NUMBER'],
         'Travel ID': ['TRAVEL ID', 'Travel ID', 'Travel id'],
         'Cost Center': ['Cost Center', 'COST CENTER']
     }
-    df = merge_columns(df, bdc_mapping)
+    
+    for target, variations in merging_map.items():
+        existing = [c for c in variations if c in df.columns]
+        if existing:
+            # Consolidate: bfill takes the first non-null value across the variants
+            df[target] = df[existing].bfill(axis=1).iloc[:, 0]
+            # Drop the variants that are not the target column name
+            cols_to_drop = [c for c in existing if c != target]
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+    return df
 
-    # Time Duration Logic
-    def get_hrs(row):
-        start = str(row.get('Trip Start Time', '')).strip()
-        end = str(row.get('Trip End Time', '')).strip()
-        if not start or not end or 'nan' in start.lower(): return 0.0
+# --- 2. BDC CALCULATION LOGIC ---
+def process_bdc_logic(df):
+    # Time Calculation
+    def calculate_duration(row):
+        start_str = str(row.get('Trip Start Time', '')).strip()
+        end_str = str(row.get('Trip End Time', '')).strip()
+        if not start_str or not end_str or 'nan' in start_str.lower(): return 0.0
         try:
-            fmt = '%H:%M' if len(start.split(':')) == 2 else '%H:%M:%S'
-            diff = (datetime.strptime(end, fmt) - datetime.strptime(start, fmt)).total_seconds() / 3600.0
+            fmt = '%H:%M' if len(start_str.split(':')) == 2 else '%H:%M:%S'
+            diff = (datetime.strptime(end_str, fmt) - datetime.strptime(start_str, fmt)).total_seconds() / 3600.0
             return diff + 24.0 if diff < 0 else diff
         except: return 0.0
 
-    df['Total_HRS_Float'] = df.apply(get_hrs, axis=1)
+    df['Total_HRS_Float'] = df.apply(calculate_duration, axis=1)
     df['Total HRS.'] = df['Total_HRS_Float'].apply(lambda x: f"{int(x):02d}:{int((x*60)%60):02d}:00")
 
     # 150KM & Slab Logic
-    special_cities = ['Mumbai Suburban District', 'Thane Subdistrict', 'Kalyan Subdistrict', 'Ulhasnagar Subdistrict', 'Bhiwandi Subdistrict', 'Vasai Subdistrict', 'Mumbai City District']
+    special_cities = ['Mumbai Suburban District', 'Thane Subdistrict', 'Kalyan Subdistrict', 
+                      'Ulhasnagar Subdistrict', 'Bhiwandi Subdistrict', 'Vasai Subdistrict', 'Mumbai City District']
     rates = {
-        'SEDAN': (289, 240, 185), 'SUV': (340, 285, 215), 'PREMIUM_SUV': (500, 415, 330), 'HATCHBACK': (200, 150, 100)
+        'SEDAN': (289, 240, 185), 'SUV': (340, 285, 215), 
+        'PREMIUM_SUV': (500, 415, 330), 'HATCHBACK': (200, 150, 100)
     }
 
-    def calc_billing(row):
-        is_special = (row['Pickup City'] in special_cities) and (row['Duty Type'] == 'Daily Rentals')
+    def run_billing(row):
+        is_special = (row.get('Pickup City') in special_cities) and (row.get('Duty Type') == 'Daily Rentals')
         hrs = row['Total_HRS_Float']
         vt = str(row.get('Vehicle Group', 'SEDAN')).upper()
         r1, r2, r3 = rates.get(vt, rates['SEDAN'])
         
-        # Slabs
+        # Calculate Slab Breakdown
         s1, s2, s3 = min(6.0, hrs), min(6.0, max(0, hrs-6.0)), max(0, hrs-12.0)
         
         if is_special:
+            # Special 150km Logic
             basic = (s1*r1) + (s2*r2) + (s3*r3)
+            # Use 'Sales Extra Hour Rate' for KM calculation as requested
             ex_km_chg = max(0, row.get('Trip Distance(Duty slip-KM)', 0) - 150) * row.get('Sales Extra Hour Rate', 0)
             return pd.Series(["150 km", basic, s1, s2, s3, ex_km_chg, 0, s1*r1, s2*r2, s3*r3])
         else:
+            # Standard Billing
             return pd.Series([row.get('Duty Package', ''), row.get('Sales Base Price', 0), s1, s2, s3, 
                              row.get('Sales Extra KM Charges', 0), row.get('Sales Extra Hour Charges', 0), 0, 0, 0])
 
-    cols = ['BDC_Pkg', 'BDC_Basic', '4-6/hrs', '6-12/hrs', '12/hrs & above', 'Ex_Kms_Chg', 'Ex_Hrs_Chg', 'S1_Rate', 'S2_Rate', 'S3_Rate']
-    df[cols] = df.apply(calc_billing, axis=1)
+    calc_cols = ['Duty Package', 'Basic', '4-6/hrs', '6-12/hrs', '12/hrs & above', 'Ex. Kms Charges', 'Ex. HRS Charges', 'Per Hr 0-6', 'Per Hr 6-12', 'Per Hr 12+']
+    df[calc_cols] = df.apply(run_billing, axis=1)
 
-    # Financials
-    df['Revenue Amt.'] = df['BDC_Basic'] + df['Ex_Kms_Chg'] + df['Ex_Hrs_Chg']
+    # Financial Aggregation
+    df['Revenue Amt.'] = df['Basic'] + df['Ex. Kms Charges'] + df['Ex. HRS Charges']
     df['Total Amt'] = df['Revenue Amt.'] + df[['PARKING (Sales)', 'TOLL (Sales)', 'NIGHT_CHARGES (Sales)', 'PERMIT (Sales)']].sum(axis=1)
     df['GST/IGST @ 5%'] = df['Total Amt'] * 0.05
     df['Gross Amt'] = (df['Total Amt'] + df['GST/IGST @ 5%']).round(2)
     
-    # State Mapping
-    def get_state(c, s):
-        c_l = str(c).lower()
-        if any(x in c_l for x in ['mumbai', 'thane', 'kalyan', 'pune']): return 'Maharashtra'
-        if 'bangalore' in c_l or 'bengaluru' in c_l: return 'Karnataka'
-        return s
-    df['State'] = df.apply(lambda r: get_state(r['Pickup City'], r['Pickup State']), axis=1)
-
     return df
 
-# --- 4. STREAMLIT UI ---
-st.title("🚗 Car Rental Automation Expert")
-tab1, tab2 = st.tabs(["📊 MIS Automation", "📄 BDC Automation"])
+# --- 3. STREAMLIT UI ---
+st.title("🚗 Car Rental Automation - Yogesh Jambhale")
+tab1, tab2 = st.tabs(["📊 MIS Automation", "🧾 BDC Automation"])
 
 with tab1:
-    st.header("Admin MIS Processing")
-    file1 = st.file_uploader("Upload Raw MIS (CSV)", type=["csv"], key="mis_up")
-    if file1:
-        out1 = process_car_rental_mis(file1)
-        st.success("MIS Processed!")
-        st.dataframe(out1.head())
-        st.download_button("Download Processed MIS", out1.to_csv(index=False), "MIS_Processed.csv")
+    st.header("Admin MIS Cleaning & Filtering")
+    mis_file = st.file_uploader("Upload MIS CSV", type=["csv"], key="mis")
+    if mis_file:
+        df_mis = pd.read_csv(mis_file)
+        df_mis = apply_merging_logic(df_mis)
+        
+        # Existing MIS Logic: Filter and Classification
+        if 'Trip Status' in df_mis.columns:
+            df_mis = df_mis[df_mis['Trip Status'].str.upper() != 'CANCELLED']
+        
+        st.success("MIS Processed Successfully!")
+        st.dataframe(df_mis.head())
+        st.download_button("Download Processed MIS", df_mis.to_csv(index=False), "MIS_Processed.csv")
 
 with tab2:
-    st.header("BDC Generation & Slab Calculation")
-    file2 = st.file_uploader("Upload Raw Data for BDC (CSV)", type=["csv"], key="bdc_up")
-    if file2:
-        out2 = process_bdc_automation(file2)
-        st.success("BDC Data Generated with 150km Logic!")
+    st.header("BDC Automation & Slab Calculation")
+    bdc_file = st.file_uploader("Upload Raw Data for BDC", type=["csv"], key="bdc")
+    if bdc_file:
+        df_bdc = pd.read_csv(bdc_file)
+        df_bdc = apply_merging_logic(df_bdc)
+        df_bdc = process_bdc_logic(df_bdc)
         
-        # Prepare Excel with two sheets
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            out2.to_excel(writer, sheet_name='BDC_Full_Data', index=False)
-            summary = out2.groupby(['Customer', 'Sales Invoice Number']).agg({'Gross Amt': 'sum', 'Booking ID': 'count'}).reset_index()
+        st.success("BDC Logic Applied with 150km Slabs!")
+        
+        # Prepare Excel download
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_bdc.to_excel(writer, sheet_name='BDC', index=False)
+            # Create Summary Sheet
+            summary = df_bdc.groupby(['Customer', 'Sales Invoice Number']).agg({
+                'Gross Amt': 'sum', 'Booking ID': 'count'
+            }).reset_index().rename(columns={'Booking ID': 'No of Bookings'})
             summary.to_excel(writer, sheet_name='SUMMARY', index=False)
         
         st.download_button(
             label="⬇️ Download BDC Automation Excel",
-            data=buffer.getvalue(),
+            data=output.getvalue(),
             file_name="Automated_BDC_Report.xlsx",
-            mime="application/vnd.ms-excel"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        st.dataframe(out2[['Booking ID', 'Pickup City', 'Duty Type', '4-6/hrs', '6-12/hrs', 'Gross Amt']].head(10))
+        st.dataframe(df_bdc[['Booking ID', 'Trip ID', 'Duty Package', 'Basic', 'Gross Amt']].head())
