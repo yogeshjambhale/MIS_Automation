@@ -39,24 +39,34 @@ def consolidate_columns(df):
 # --- 2. CUSTOM LOGIC: DUTY DETAIL RENAMING ---
 def refine_duty_detail(row):
     """
-    Applies special city logic and tiered package renaming as requested.
+    Applies special city logic, outstation state logic, and tiered package renaming.
     """
-    city = str(row.get('Pickup City', ''))
-    duty_type = str(row.get('Duty Type', ''))
-    package = str(row.get('Duty Package', ''))
+    city = str(row.get('Pickup City', '')).strip()
+    duty_type = str(row.get('Duty Type', '')).strip()
+    package = str(row.get('Duty Package', '')).strip()
+    state = str(row.get('Pickup State', '')).strip().title()
     
+    # A. Special City Logic (Mumbai/Thane Region)
     special_cities = [
         'Mumbai Suburban District', 'Thane Subdistrict', 'Kalyan Subdistrict', 
         'Vasai Subdistrict', 'Mumbai City District', 'Bhiwandi Subdistrict', 'Ulhasnagar Subdistrict'
     ]
     
-    # 1. Special City Logic (Airport Transfer vs 150 km)
     if city in special_cities:
         if any(x in duty_type for x in ['Airport Pickup', 'Airport Drop', 'Airport Transfer']):
             return "Airport Transfer"
         return "150 km"
     
-    # 2. Tiered Package Logic (Extract KM from string)
+    # B. Outstation Return Logic
+    special_states = ['Assam', 'West Bengal', 'Jammu And Kashmir', 'Uttarakhand', 'Tripura', 'Himachal Pradesh']
+    
+    if duty_type == "Outstation Return":
+        if state in special_states:
+            return "300 KM"
+        else:
+            return "250 KM"
+
+    # C. Tiered Package Logic (Extract KM from string)
     try:
         km_match = re.search(r'(\d+)\s*KM', package, re.IGNORECASE)
         if km_match:
@@ -122,7 +132,7 @@ def process_bdc_automation(file):
     df['Total_HRS_Float'] = df.apply(get_duration, axis=1)
     df['Total HRS. Formatted'] = df['Total_HRS_Float'].apply(lambda x: f"{int(x):02d}:{int((x*60)%60):02d}:00")
 
-    # Slab Billing based on vehicle type
+    # Slab Billing
     rates = {'SEDAN': (289, 240, 185), 'SUV': (340, 285, 215), 'PREMIUM_SUV': (500, 415, 330)}
     def apply_billing(row):
         is_special = row['Duty_Detail_Final'] in ["150 km", "Airport Transfer"]
@@ -132,7 +142,6 @@ def process_bdc_automation(file):
         
         if is_special:
             basic = (s1*r1) + (s2*r2) + (s3*r3)
-            # Use 'Sales Extra Hour Rate' for km charges on special trips
             ex_km_chg = max(0, row.get('Trip Distance(Duty slip-KM)', 0) - 150) * row.get('Sales Extra Hour Rate', 0)
             return pd.Series([basic, s1, s2, s3, ex_km_chg, 0, s1*r1, s2*r2, s3*r3])
         return pd.Series([row.get('Sales Base Price', 0), s1, s2, s3, row.get('Sales Extra KM Charges', 0), row.get('Sales Extra Hour Charges', 0), 0, 0, 0])
@@ -143,7 +152,7 @@ def process_bdc_automation(file):
     df['Total Amt'] = df['Revenue Amt.'] + df[['PARKING (Sales)', 'TOLL (Sales)', 'NIGHT_CHARGES (Sales)', 'PERMIT (Sales)']].fillna(0).sum(axis=1)
     df['Gross Amt'] = (df['Total Amt'] * 1.05).round(2)
 
-    # --- AUTO BDC EXACT COLUMN MAPPING (54 COLUMNS) ---
+    # --- AUTO BDC EXACT COLUMN MAPPING ---
     auto_bdc = pd.DataFrame(index=df.index)
     auto_bdc['Sr. No'] = range(1, len(df) + 1)
     auto_bdc['\xa0Vendor Name '] = 'Aurafox Solution PVT LTD'
@@ -159,11 +168,11 @@ def process_bdc_automation(file):
     auto_bdc['RIL GST Number'] = df.get('GSTN Number', '')
     auto_bdc['Vendor GST num.'] = '27AAOCA9263A1ZL'
     auto_bdc['Travel Date'] = df.get('Trip Start Date', '')
-    auto_bdc['End Date'] = df.get('Trip End Date', '') # Corrected header
+    auto_bdc['End Date'] = df.get('Trip End Date', '')
     auto_bdc['Total Days'] = df.get('Total Trip Days', 1)
     auto_bdc['Dutyslip num.'] = df.get('Booking ID', '')
     auto_bdc['Type of Duty'] = df.get('Duty Type', '')
-    auto_bdc['Duty Detail'] = df['Duty_Detail_Final'] # Replaces Unnamed placeholders
+    auto_bdc['Duty Detail'] = df['Duty_Detail_Final']
     auto_bdc['Vehicle Type'] = df.get('Vehicle Group', '')
     auto_bdc['Basic'] = df.get('BDC_Basic', 0)
     auto_bdc['Car No.'] = df.get('Vehicle Number', '')
