@@ -11,12 +11,9 @@ st.set_page_config(page_title="Car Rental Automation Suite", layout="wide")
 # --- 1. SHARED UTILITY: COLUMN MERGING & CLEANING ---
 def consolidate_columns(df):
     """
-    Standardizes headers and merges redundant columns to prevent ValueError.
+    Standardizes headers and merges redundant columns to prevent duplicates.
     """
-    # Clean headers: remove hidden spaces and collapse double spaces
     df.columns = df.columns.str.strip().str.replace(r'\s+', ' ', regex=True)
-    
-    # Handle physical duplicate columns in the raw CSV
     df = df.loc[:, ~df.columns.duplicated()].copy()
     
     mapping = {
@@ -39,34 +36,44 @@ def consolidate_columns(df):
 # --- 2. CUSTOM LOGIC: DUTY DETAIL RENAMING ---
 def refine_duty_detail(row):
     """
-    Applies special city logic, outstation state logic, and tiered package renaming.
+    Applies city, outstation, and tiered package logic while handling missing values.
     """
+    # Safely get values, handling NaNs to prevent 'nan' strings
     city = str(row.get('Pickup City', '')).strip()
-    duty_type = str(row.get('Duty Type', '')).strip()
-    package = str(row.get('Duty Package', '')).strip()
-    state = str(row.get('Pickup State', '')).strip().title()
+    if city.lower() == 'nan': city = ''
     
-    # A. Special City Logic (Mumbai/Thane Region)
+    duty_type = str(row.get('Duty Type', '')).strip()
+    if duty_type.lower() == 'nan': duty_type = ''
+    
+    package = str(row.get('Duty Package', '')).strip()
+    if package.lower() == 'nan': package = ''
+    
+    state = str(row.get('Pickup State', '')).strip().title()
+    if state.lower() == 'nan': state = ''
+
     special_cities = [
         'Mumbai Suburban District', 'Thane Subdistrict', 'Kalyan Subdistrict', 
         'Vasai Subdistrict', 'Mumbai City District', 'Bhiwandi Subdistrict', 'Ulhasnagar Subdistrict'
     ]
     
+    # 1. New Condition: Outstation Return for Special Cities
+    if city in special_cities and duty_type == "Outstation Return":
+        return "250 KM"
+
+    # 2. Special City Logic (Local/Airport)
     if city in special_cities:
         if any(x in duty_type for x in ['Airport Pickup', 'Airport Drop', 'Airport Transfer']):
             return "Airport Transfer"
         return "150 km"
-    
-    # B. Outstation Return Logic
+
+    # 3. Outstation Return Logic for Other Regions
     special_states = ['Assam', 'West Bengal', 'Jammu And Kashmir', 'Uttarakhand', 'Tripura', 'Himachal Pradesh']
-    
     if duty_type == "Outstation Return":
         if state in special_states:
             return "300 KM"
-        else:
-            return "250 KM"
+        return "250 KM"
 
-    # C. Tiered Package Logic (Extract KM from string)
+    # 4. Tiered Package Logic (Based on KM values)
     try:
         km_match = re.search(r'(\d+)\s*KM', package, re.IGNORECASE)
         if km_match:
@@ -78,22 +85,18 @@ def refine_duty_detail(row):
     except:
         pass
         
-    return package
+    return package if package else "Local" # Default fallback to fix NaN issues
 
 # --- 3. MIS AUTOMATION LOGIC ---
 def process_car_rental_mis(file):
     df = pd.read_csv(file)
     df = consolidate_columns(df)
-
     if 'Trip Status' in df.columns:
         df = df[df['Trip Status'].str.upper() != 'CANCELLED']
-
     if 'Labels' in df.columns:
         df['Labels'] = df['Labels'].fillna('')
         unwanted = 'No Bill|Pickup Fail|Duplicate Booking|Vendor No-show'
         df = df[~df['Labels'].str.contains(unwanted, case=False, regex=True)]
-
-    # Status Classification
     conditions = [
         (df['Sales Duty Slip Status'] == 'APPROVED') & (df['Sales Billing Status'] == 'BILLED'),
         (df['Sales Duty Slip Status'] == 'APPROVED') & (df['Sales Billing Status'] == 'UNBILLED'),
@@ -104,13 +107,6 @@ def process_car_rental_mis(file):
     ]
     choices = ['BILLED', 'UNBILLED', 'RECEIVED', 'RECEIVED', 'RECEIVED', 'PENDING']
     df['Final Status'] = np.select(conditions, choices, default='OTHER')
-
-    # Zonal Mapping
-    zone_map = {'Maharashtra': 'West', 'Karnataka': 'South', 'Delhi': 'North', 'West Bengal': 'East'}
-    if 'Pickup State' in df.columns:
-        df['Pickup State'] = df['Pickup State'].str.strip().str.title()
-        df['Zone'] = df['Pickup State'].map(zone_map).fillna('Unknown Zone')
-
     return df
 
 # --- 4. BDC & AutoBDC LOGIC ---
@@ -132,17 +128,18 @@ def process_bdc_automation(file):
     df['Total_HRS_Float'] = df.apply(get_duration, axis=1)
     df['Total HRS. Formatted'] = df['Total_HRS_Float'].apply(lambda x: f"{int(x):02d}:{int((x*60)%60):02d}:00")
 
-    # Slab Billing
     rates = {'SEDAN': (289, 240, 185), 'SUV': (340, 285, 215), 'PREMIUM_SUV': (500, 415, 330)}
     def apply_billing(row):
-        is_special = row['Duty_Detail_Final'] in ["150 km", "Airport Transfer"]
+        is_special = row['Duty_Detail_Final'] in ["150 km", "Airport Transfer", "250 KM", "300 KM"]
         hrs = row['Total_HRS_Float']
         r1, r2, r3 = rates.get(str(row.get('Vehicle Group', '')).upper(), rates['SEDAN'])
         s1, s2, s3 = min(6.0, hrs), min(6.0, max(0, hrs-6.0)), max(0, hrs-12.0)
         
         if is_special:
             basic = (s1*r1) + (s2*r2) + (s3*r3)
-            ex_km_chg = max(0, row.get('Trip Distance(Duty slip-KM)', 0) - 150) * row.get('Sales Extra Hour Rate', 0)
+            # Threshold for extra KM varies: 150 for Mumbai Local, otherwise from original data logic
+            threshold = 150 if row['Duty_Detail_Final'] == "150 km" else 250
+            ex_km_chg = max(0, row.get('Trip Distance(Duty slip-KM)', 0) - threshold) * row.get('Sales Extra Hour Rate', 0)
             return pd.Series([basic, s1, s2, s3, ex_km_chg, 0, s1*r1, s2*r2, s3*r3])
         return pd.Series([row.get('Sales Base Price', 0), s1, s2, s3, row.get('Sales Extra KM Charges', 0), row.get('Sales Extra Hour Charges', 0), 0, 0, 0])
 
@@ -152,7 +149,7 @@ def process_bdc_automation(file):
     df['Total Amt'] = df['Revenue Amt.'] + df[['PARKING (Sales)', 'TOLL (Sales)', 'NIGHT_CHARGES (Sales)', 'PERMIT (Sales)']].fillna(0).sum(axis=1)
     df['Gross Amt'] = (df['Total Amt'] * 1.05).round(2)
 
-    # --- AUTO BDC EXACT COLUMN MAPPING ---
+    # --- AUTO BDC EXACT COLUMN MAPPING (54 COLUMNS) ---
     auto_bdc = pd.DataFrame(index=df.index)
     auto_bdc['Sr. No'] = range(1, len(df) + 1)
     auto_bdc['\xa0Vendor Name '] = 'Aurafox Solution PVT LTD'
@@ -213,7 +210,6 @@ def process_bdc_automation(file):
 
 # --- 5. STREAMLIT UI ---
 st.title("🚗 Car Rental Automation Suite By Yogesh Jambhale")
-
 tab1, tab2, tab3 = st.tabs(["📊 MIS Automation", "📄 BDC Automation", "✨ AutoBDC"])
 
 with tab1:
