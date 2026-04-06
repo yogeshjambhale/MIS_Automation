@@ -233,11 +233,9 @@ with tab3:
         st.download_button(label="⬇️ Download AutoBDC Excel", data=output.getvalue(), file_name="AutoBDC_Final.xlsx")
     else:
         st.warning("Please upload a file in the 'BDC Automation' tab first.")            
-            # Drop all old variants to prevent duplicate name errors
-            df = df.drop(columns=existing_cols)
+        df = df.drop(columns=existing_cols)
             
-            # Insert the new cleaned column
-            df[target_col] = consolidated_series
+        df[target_col] = consolidated_series
             
     return df
 
