@@ -209,7 +209,7 @@ def process_bdc_automation(file):
     return df, auto_bdc
 
 # --- 5. STREAMLIT UI ---
-st.title("🚗 Car Rental Automation Suite By Yogesh Jambhale")
+st.title("MIS Automation Tool")
 tab1, tab2, tab3 = st.tabs(["📊 MIS Automation", "📄 BDC Automation", "✨ AutoBDC"])
 
 with tab1:
